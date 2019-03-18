@@ -1,0 +1,971 @@
+---
+title: "ARCH-vue Dashboard"
+# author: "Hossein Estiri"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    social: menu
+    # source_code: embed
+    # vertical_layout: scroll
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+options(scipen = 999)
+if (!require("easypackages")) install.packages('easypackages', repos = "http://cran.rstudio.com/")
+
+packages("data.table","devtools","dplyr","DT","ggplot2","gridExtra","htmlwidgets","knitr",
+         "rmarkdown","plotly","treemap","reshape2","visNetwork","rmdformats","ggrepel",
+         "flexdashboard","highcharter","viridisLite","shiny","DiagrammeR","collapsibleTree","lubridate",
+         prompt = F)
+
+if (names(dev.cur()) != "null device") dev.off()
+pdf(NULL)
+
+Net.Name = "NetworkName" 
+
+### data model
+data.model = "PCORnet v.3" 
+cdm = "PCORNET3"
+
+
+# primary key for population count
+pop.key = "patid"
+
+# source("id.R")
+percent = function(x, digits = 2, format = "f", ...) {
+  paste0(formatC(x*100, format = format, digits = digits, ...), "%")
+}
+
+source(paste0(getwd(),"/collapsibleTreeShiny.R"))
+source(paste0(getwd(),"/collapsibleTreeSummary.R"))
+
+
+pth = paste0(getwd(),"/site.reports") #set the path to where DQe-c report files from individual sites are stored
+report.tables = data.frame(table.names=list.files(pth))
+report.tables$table.group = substr(report.tables$table.names, 0,7)
+for (i in 1:length(report.tables$table.names)) {
+report.tables$date[i] = as.character(substr(report.tables$table.names[i], 
+                                nchar(as.character(report.tables$table.names[i]))-13,
+                                nchar(as.character(report.tables$table.names[i]))-4))
+if (report.tables$table.group[i] == "without") {
+report.tables$organization[i] = as.character(substr(report.tables$table.names[i], 
+                                9+nchar(cdm)+2,
+                                nchar(as.character(report.tables$table.names[i]))-15))
+} else if (report.tables$table.group[i] == "DQ_Mast") {
+  report.tables$organization[i] = as.character(substr(report.tables$table.names[i], 
+                                16+nchar(cdm)+2,
+                                nchar(as.character(report.tables$table.names[i]))-15))
+}
+}
+report.tables$date <- dmy(report.tables$date)
+
+
+##obtaining the latest test dates available by site and group
+latests.test.dates = aggregate(report.tables$date, by = list(report.tables$organization,report.tables$table.group), max)
+colnames(latests.test.dates) = c("site", "table.group","date")
+
+rounds <- list()
+for (i in 1:length(unique(report.tables$organization))) {
+  org <- unique(report.tables$organization)[i]
+  sub.tab <- data.frame(unique(subset(report.tables$date, 
+                                     report.tables$organization == org)))
+  colnames(sub.tab) <- "test_date"
+  sub.tab$organization <- org
+  sub.tab <- data.frame(sub.tab[order(sub.tab$test_date,decreasing = F),])
+  sub.tab$round <- seq.int(nrow(sub.tab))
+  rounds[[i]] <- sub.tab
+}
+
+DQ.rounds <- do.call(rbind, lapply(rounds, data.frame, stringsAsFactors=FALSE))
+
+
+# extracting DQ_Master tables
+DQ_Master.names <- report.tables[(report.tables$table.group == "DQ_Mast"),"table.names"]
+# reading in all DQ_Master tables
+ms.tables <- list()
+for (l in 1:length(DQ_Master.names)) {
+  ms.tables[[l]] <- data.frame(read.csv(paste0(pth,"/",DQ_Master.names[l])))
+}
+DQ.Master <- do.call(rbind, lapply(ms.tables, data.frame, stringsAsFactors=FALSE))
+rm(ms.tables)
+
+
+# DQ.Master$test_date <- as.Date(DQ.Master$test_date, format = "%m-%d-%Y")
+DQ.Master$test_date <- mdy(DQ.Master$test_date) 
+DQ.Master <- merge(DQ.Master,DQ.rounds, by=c("organization","test_date"), all.x = TRUE)
+
+latest.DQM <- aggregate(DQ.Master$test_date, by = list(DQ.Master$organization), max)
+latest.DQM$run.char <- paste0(latest.DQM$Group.1,latest.DQM$x)
+
+latest.DQM.round <- aggregate(DQ.Master$round, by = list(DQ.Master$organization), max)
+latest.DQM.round$round.char <- paste0(latest.DQM.round$Group.1,latest.DQM.round$x)
+
+
+
+DQ.Master$run.char <- paste0(DQ.Master$organization,DQ.Master$test_date)
+DQ.Master$round.char <- paste0(DQ.Master$organization,DQ.Master$round)
+
+
+
+# subseting the latest DQ.Master
+DQ.Master.latest <- select(subset(DQ.Master,DQ.Master$run.char %in% c(latest.DQM$run.char)), TabNam,ColNam,test_date,FRQ,UNIQFRQ,MS1_FRQ,MS2_FRQ,MSs_PERC,organization,round, DQLVL)
+
+
+###with
+without.names <- report.tables[(report.tables$table.group == "without"),"table.names"]
+without.tabs <- list()
+for (w in 1:length(without.names)) {
+  without.tabs[[w]] <- data.frame(read.csv(paste0(pth,"/",without.names[w])))
+}
+
+withouts.network <- do.call(rbind, lapply(without.tabs, data.frame, stringsAsFactors=FALSE))
+rm(without.tabs)
+
+
+withouts.network$missing.population <- round((withouts.network$missing.percentage/100)*withouts.network$denominator,0)
+
+withouts.network$missing.ratio <- withouts.network$missing.percentage/100
+
+
+withouts.network$test_date <- mdy(withouts.network$test_date) 
+# withouts.network$test_date = as.Date(withouts.network$test_date, format = "%m-%d-%Y")
+
+withouts.network <- merge(withouts.network,DQ.rounds, by=c("organization","test_date"), all.x = TRUE)
+
+latest.withouts.network <- aggregate(withouts.network$test_date, by = list(withouts.network$organization), max)
+latest.withouts.network$run.char <- paste0(latest.withouts.network$Group.1,latest.withouts.network$x)
+withouts.network$round.x <- withouts.network$round
+latest.withouts.network.round <- aggregate(withouts.network$round, by = list(withouts.network$organization), max)
+latest.withouts.network.round$round.char <- paste0(latest.withouts.network.round$Group.1,latest.withouts.network.round$x)
+
+withouts.network$run.char <- paste0(withouts.network$organization,withouts.network$test_date)
+withouts.network$round.char <- paste0(withouts.network$organization,withouts.network$round)
+
+# subseting the latest withouts table
+withouts.network.latest <- select(subset(withouts.network,withouts.network$run.char %in% c(latest.withouts.network$run.char)),group,missing.percentage,missing.population,denominator,perc,organization,test_date, missing.ratio)
+                                 
+# 
+withouts.network.latest.aggregate <- withouts.network.latest %>% group_by(group) %>% summarise(missing.pop = sum(missing.population),denominator = sum(denominator))
+
+# 
+withouts.network.latest.aggregate$missing.ratio <- round((withouts.network.latest.aggregate$missing.pop/withouts.network.latest.aggregate$denominator),4)
+withouts.network.latest.aggregate$perc <- percent(withouts.network.latest.aggregate$missing.ratio)
+withouts.network.latest.aggregate$organization <- "Network"
+withouts.network.latest.aggregate$test_date <- as.character(format(Sys.Date(),"%m-%d-%Y"))
+
+
+############# population projections
+
+pops <- select(subset(DQ.Master, DQ.Master$TabNam == "demographic" & DQ.Master$ColNam == "patid"),organization,test_date,UNIQFRQ,round,run.char,round.char)
+pops$difftime <- 9999
+min.run <- min(pops$test_date)
+pops$difftime <- ifelse(pops$test_date == min.run, 
+                       0.1,
+                        pops$difftime)
+
+##calculating time difference in days from first ime
+pops$difftime.orig <- ifelse(pops$test_date == min.run, 
+                             0.1,
+                             as.numeric(difftime(pops$test_date,
+                                          min.run, tz="",units = c("days"))))
+
+
+##calculating time difference in days from the previous time
+for (i in 2:nrow(pops)) {
+  pops[order(as.Date(pops$test_date)),7][i] <- as.numeric(difftime(pops[order(as.Date(pops$test_date)),2][i],
+                                                                   pops[order(as.Date(pops$test_date)),2][i-1], tz="",units = c("days")))
+  
+  
+}
+
+
+
+setDT(pops)
+pops.wide <- dcast(pops, test_date +difftime.orig ~ organization, value.var="UNIQFRQ", fun.aggregate = sum)
+pops.wide[pops.wide == 0] <- NA
+
+pops.proj <- list()
+resids <- data.frame(cbind(degree=c(1,2,3,4,5),
+                     residual = c(0,0,0,0,0)))
+for (j in 3:dim(pops.wide)[2]){
+  oo <- pops.wide[,c(1,2,j)]
+  name <- colnames(oo)[3]
+  colnames(oo)[3] <- "UNIQFRQ"
+  oo$organization <- name
+  train <- subset(oo,!is.na(oo$UNIQFRQ))
+  oo$projection <- ifelse(!is.na(oo$UNIQFRQ), "observed", "estimate")
+  
+        # finding the min residual model
+        for (d in 1:nrow(resids)){
+        fit.test <- lm(UNIQFRQ~poly(difftime.orig, d, raw=T),data=train)
+        resids[resids$degree == d,2] <- as.numeric(predict(fit.test,newdata=oo,interval="confidence",
+                level = 0.95,type="response",se = TRUE)$residual.scale)
+        }
+  r2 <- subset(resids,!is.na(resids$residual))
+  min.res <- ifelse(min((r2$residual)) == 0 ,1,min(r2$residual))
+  best.dg <- as.numeric(r2[r2$residual == min.res,1])
+  resids$residual <- 0
+  fit <- lm(UNIQFRQ~poly(difftime.orig, best.dg, raw=T),data=train)
+  oo$pred.UNIQFRQ <- predict(fit,newdata=oo,interval="confidence",
+                                 level = 0.95,type="response",se = TRUE)$fit[,1]
+  oo$pred.low.UNIQFRQ <- predict(fit,newdata=oo,interval="confidence",
+                                        level = 0.95,type="response",se = TRUE)$fit[,2]
+  oo$pred.high.UNIQFRQ <- predict(fit,newdata=oo,interval="confidence",
+                                        level = 0.95,type="response",se = TRUE)$fit[,3]
+  oo$pred.UNIQFRQ <- ifelse(!is.na(oo$UNIQFRQ), oo$UNIQFRQ, oo$pred.UNIQFRQ)
+  oo$pred.low.UNIQFRQ <- ifelse(!is.na(oo$UNIQFRQ), 0, oo$pred.low.UNIQFRQ)
+  oo$pred.high.UNIQFRQ <- ifelse(!is.na(oo$UNIQFRQ), 0, oo$pred.high.UNIQFRQ)
+  oo$ci <- ifelse(!is.na(oo$UNIQFRQ), 0, oo$pred.UNIQFRQ-oo$pred.low.UNIQFRQ)
+  
+  oo$best.dg <- best.dg
+  rm(fit)
+  
+  pops.proj[[j]] <- oo
+  rm(oo)
+  
+}
+
+comp.pop <- do.call(rbind, lapply(pops.proj, data.frame, stringsAsFactors=FALSE))
+rm(pops)
+# comp.pop.agg <- dcast(comp.pop, test_date ~ , value.var="UNIQFRQ", fun.aggregate = sum)
+comp.pop.agg <-aggregate(list(pred.UNIQFRQ=comp.pop$pred.UNIQFRQ,pred.low.UNIQFRQ=comp.pop$pred.low.UNIQFRQ,pred.high.UNIQFRQ=comp.pop$pred.high.UNIQFRQ), by = list(test_date=comp.pop$test_date), sum)
+comp.pop.agg$difftime.orig <- 999
+comp.pop.agg$UNIQFRQ <- 999
+comp.pop.agg$organization <- "NETWORK NAME"
+comp.pop.agg$projection <- "estimate"
+comp.pop.agg$best.dg <- 9999
+comp.pop.agg.ci <-aggregate(list(ci=comp.pop$ci), by = list(test_date=comp.pop$test_date), mean)
+comp.pop.agg <- merge(comp.pop.agg,comp.pop.agg.ci,by="test_date")
+comp.pop <- rbind(comp.pop,comp.pop.agg)
+comp.pop$pred.low.UNIQFRQ <- comp.pop$pred.UNIQFRQ-comp.pop$ci
+comp.pop$pred.high.UNIQFRQ <- comp.pop$pred.UNIQFRQ+comp.pop$ci
+
+
+```
+
+
+
+Selections {.sidebar}
+===============================
+
+###Select Network Site
+Dashboard has data from **`r length(unique(DQ.Master$organization))`** **`r Net.Name`** Network participating sites. 
+
+
+```{r}
+## The shiny part
+selectInput("site", label = "Network site", 
+            c("Network","site 1","site 2","site n"))
+
+
+```
+
+
+
+Preview
+=======================================================================
+
+Row
+-----------------------------------------------------------------------
+
+### Total Network Unique Patients {.value-box}
+
+```{r}
+
+# Emit the user count
+renderValueBox({
+  valueBox(value = format(sum(subset(DQ.Master.latest$UNIQFRQ, (DQ.Master.latest$TabNam == "demographic" & DQ.Master.latest$ColNam == "patid"))),big.mark=",", trim=TRUE), icon = "fa-users")
+})
+```
+
+### Total Network Unique Encounters {.value-box}
+
+```{r}
+
+# Emit the user count
+renderValueBox({
+  valueBox(value = format(sum(subset(DQ.Master.latest$UNIQFRQ, (DQ.Master.latest$TabNam == "encounter" & DQ.Master.latest$ColNam == "encounterid"))),big.mark=",", trim=TRUE), icon = "fa-area-chart")
+})
+
+```
+
+### Total Network Unique Diagnosis IDs {.value-box}
+
+```{r}
+
+# Emit the user count
+renderValueBox({
+  valueBox(value = format(sum(subset(DQ.Master.latest$UNIQFRQ, (DQ.Master.latest$TabNam == "procedures" & DQ.Master.latest$ColNam == "proceduresid"))),big.mark=",", trim=TRUE), 
+           icon = "fa-file-text")
+})
+```
+
+
+Row
+-----------------------------------------------------------------------
+### Total Site Unique Patients {.value-box}
+```{r}
+
+  renderValueBox({
+  valueBox(value = if (input$site != "Network") format(sum(DQ.Master.latest[(DQ.Master.latest$TabNam == "demographic" & DQ.Master.latest$ColNam == "patid" & DQ.Master.latest$organization==input$site),"UNIQFRQ"]),big.mark=",", trim=TRUE), 
+           icon = if (input$site != "Network") "fa-users", color = "orange")
+})
+
+```
+
+### Total Site Unique Encounters {.value-box}
+```{r}
+
+renderValueBox({
+  valueBox(value = if (input$site != "Network") format(sum(DQ.Master.latest[(DQ.Master.latest$TabNam == "encounter" & DQ.Master.latest$ColNam == "encounterid" & DQ.Master.latest$organization==input$site),"UNIQFRQ"]),big.mark=",", trim=TRUE), 
+           icon = if (input$site != "Network") "fa-area-chart", color = "orange")
+})
+```
+
+
+### Total Site Unique Diagnosis IDs {.value-box}
+
+```{r}
+
+renderValueBox({
+  valueBox(value = if (input$site != "Network") format(sum(DQ.Master.latest[(DQ.Master.latest$TabNam == "procedures" & DQ.Master.latest$ColNam == "proceduresid" & DQ.Master.latest$organization==input$site),"UNIQFRQ"]),big.mark=",", trim=TRUE), 
+           icon = if (input$site != "Network") "fa-file-text" , color = "orange")
+})
+```
+
+
+Row {.tabset .tabset-fade}
+-----------------------------------------------------------------------
+
+### Historic & projected network population distribution
+
+```{r, fig.keep='none'}
+
+renderHighchart({
+  highchart() %>% 
+    hc_add_series(subset(comp.pop,comp.pop$organization!="ARCH"), 
+                type = "area", hcaes(x = test_date, y = pred.UNIQFRQ, 
+                                                      group = organization)) %>% 
+  hc_xAxis(type = "datetime", dateTimeLabelFormats = list(day = '%d of %b')) %>%
+  hc_title(text = "") %>% 
+  hc_subtitle(text = "") %>% 
+  hc_tooltip(pointFormat = "<span style=\"color:{series.color}\">{series.name}</span>:
+             <b>{point.percentage:.1f}%</b> ({point.y:,.0f} patients)<br/>",
+             shared = TRUE) %>%
+
+  hc_yAxis(title = list(text = "% of total patient population")) %>% 
+  hc_plotOptions(area = list(
+    stacking = "percent",
+    lineColor = "#ffffff",
+    lineWidth = 1,
+    marker = list(
+      lineWidth = 1,
+      lineColor = "#ffffff"
+    )))
+})
+    
+    
+    
+```
+
+
+### Projected network/site patient population
+
+```{r, fig.keep='none'}
+
+renderHighchart({
+  if (input$site == "Network"){
+   highchart() %>% 
+  hc_add_series(subset(comp.pop,comp.pop$organization=="NETWORKNAME"), 
+                  type = "arearange", hcaes(x = test_date, low = round(pred.low.UNIQFRQ,0), 
+                                                  high= round(pred.high.UNIQFRQ,0)),color="gray",fillOpacity=1,showInLegend = FALSE) %>% #enableMouseTracking = FALSE
+    hc_add_series(subset(comp.pop,comp.pop$organization=="ARCH"),
+                  type = "line", hcaes(x = test_date, y = round(pred.UNIQFRQ,0)),fillOpacity=0.1,showInLegend = FALSE) %>%
+  hc_add_series(subset(comp.pop,comp.pop$organization=="ARCH"), 
+                type = "point", hcaes(x = test_date, y = round(pred.UNIQFRQ,0), color= projection),showInLegend = FALSE,enableMouseTracking = FALSE) %>%
+    hc_xAxis(type = "datetime", dateTimeLabelFormats = list(day = '%d of %b')) %>% 
+    hc_tooltip(pointFormat = "",
+               shared = TRUE) %>%
+    hc_title(text = "Estimated Network Patient Population") %>% 
+    hc_subtitle(text = "Source: DQe-c runs") %>% 
+    hc_plotOptions(line = list(
+      dataLabels = list(enabled = TRUE),
+      enableMouseTracking = FALSE)
+    )
+  } else if (input$site != "Network"){
+    highchart() %>% 
+  hc_add_series(subset(comp.pop,comp.pop$organization==input$site),
+                type = "line", hcaes(x = test_date, y = round(pred.UNIQFRQ,0)),fillOpacity=0.1,showInLegend = FALSE) %>%
+  # hc_add_series(subset(comp.pop,comp.pop$organization==input$site), 
+  #                 type = "arearange", hcaes(x = test_date, low = round(pred.low.UNIQFRQ,0), 
+  #                                                 high= round(pred.high.UNIQFRQ,0)),color="gray",fillOpacity=0.05,showInLegend = FALSE) %>% #enableMouseTracking = FALSE
+
+  hc_add_series(subset(comp.pop,comp.pop$organization==input$site), 
+                type = "point", hcaes(x = test_date, y = round(pred.UNIQFRQ,0), color= projection),showInLegend = FALSE,enableMouseTracking = FALSE) %>%
+    hc_xAxis(type = "datetime", dateTimeLabelFormats = list(day = '%d of %b')) %>% 
+    hc_tooltip(pointFormat = "",
+               shared = TRUE) %>%
+    hc_title(text = "") %>% 
+    hc_subtitle(text = "") %>% 
+    hc_plotOptions(line = list(
+      dataLabels = list(enabled = TRUE),
+      enableMouseTracking = FALSE)
+    )
+  }
+})
+    
+    
+    
+```
+
+
+### Table availability across network/site
+
+```{r, fig.keep='none'}
+renderHighchart({
+  if (input$site == "Network"){
+    
+count.tables.latest = as.data.frame.matrix(table(DQ.Master.latest$organization,DQ.Master.latest$TabNam))
+for (i in 1:dim(count.tables.latest)[2]){
+  for (j in 1:dim(count.tables.latest)[1]) {
+    count.tables.latest[j,i] = ifelse(count.tables.latest[j,i] > 0, 1,count.tables.latest[j,i])
+  }
+}
+ratio.tables.latest = data.frame(apply(count.tables.latest,2,sum)/length(unique(DQ.Master$organization)))
+ratio.tables.latest$tables = row.names(ratio.tables.latest)
+row.names(ratio.tables.latest) = NULL
+colnames(ratio.tables.latest) = c("rate.availability","table")
+ratio.tables.latest$size = 1
+ratio.tables.latest$ratio.availability = round(ratio.tables.latest$rate.availability*100,digits=0)
+
+tm <- treemap(ratio.tables.latest,
+              index = "table",
+              vSize = "ratio.availability",
+              vColor="rate.availability",
+              type="value",
+              title = "",
+              title.legend = "Table availability across network",
+              border.col = "white",
+              position.legend = "bottom",
+              range = c(0,100)
+)
+
+highchart() %>% 
+  hc_add_series_treemap(tm, allowDrillToNode = TRUE,
+                        layoutAlgorithm = "squarified") #%>% 
+  }
+else if (input$site != "Network"){
+  count.tables.latest.site = as.data.frame.matrix(table(DQ.Master.latest$organization,DQ.Master.latest$TabNam))
+for (i in 1:dim(count.tables.latest.site)[2]){
+  for (j in 1:dim(count.tables.latest.site)[1]) {
+    count.tables.latest.site[j,i] = ifelse(count.tables.latest.site[j,i] > 0, 1,count.tables.latest.site[j,i])
+  }
+}
+
+count.tables.latest.site = subset(count.tables.latest.site, row.names(count.tables.latest.site) == input$site)
+ratio.tables.latest.site = data.frame(apply(count.tables.latest.site,2,sum))
+ratio.tables.latest.site$tables = row.names(ratio.tables.latest.site)
+row.names(ratio.tables.latest.site) = NULL
+count.tables.latest.site = data.frame(count.tables.latest.site)
+count.tables.latest.site$organization = as.character(row.names(count.tables.latest.site))
+
+colnames(ratio.tables.latest.site) = c("rate.availability","table")
+ratio.tables.latest.site$size = 1
+ratio.tables.latest.site$ratio.availability = round(ratio.tables.latest.site$rate.availability*100,digits=0)
+
+ratio.tables.latest.site2 = reactive({ratio.tables.latest.site})
+tm2 <- treemap(ratio.tables.latest.site,
+        index = "table",
+        vSize = "ratio.availability",
+        vColor="ratio.availability",
+        type="value",
+        title = paste0("Table availability @ ",input$site,"." ),
+        title.legend = "Table availability across network",
+        border.col = "white",
+        position.legend = "bottom",
+        range = c(0,100)
+        )
+
+highchart() %>% 
+  hc_add_series_treemap(tm2, allowDrillToNode = TRUE,
+                        layoutAlgorithm = "squarified") #%>% 
+  # hc_add_theme(thm)
+}
+})
+```
+
+
+
+Preview Changes
+=======================================================================
+Row {.tabset .tabset-fade}
+-----------------------------------------------------------------------
+
+### changes over time
+
+```{r, fig.keep='none'}
+renderPlot({
+
+key.variables = subset(DQ.Master, 
+       (DQ.Master$TabNam == "demographic" & DQ.Master$ColNam == "patid") | 
+         (DQ.Master$TabNam == "encounter" & DQ.Master$ColNam == "encounterid") |
+         (DQ.Master$TabNam == "diagnosis" & DQ.Master$ColNam == "diagnosisid") |
+         (DQ.Master$TabNam == "procedures" & DQ.Master$ColNam == "proceduresid"))
+
+
+options(scipen=999)
+
+if (input$site == "Network") {
+ggplot(key.variables,aes(x=test_date, y = UNIQFRQ, group=factor(organization))) +
+  # geom_boxplot(aes(color=organization), alpha=0.2) +
+  geom_point(aes(color=organization), shape = 21, size = 4, stroke= 1) + 
+  geom_line(aes(color=organization), alpha= 0.6)+
+  geom_text_repel(aes(label = organization))+
+  facet_wrap( ~ TabNam, scale="free_y", ncol = 2) +
+  scale_fill_gradient(limits=c(0, 1),low="#FFFAF0", high="#EE2C2C", guide=F ,na.value="white")+
+  theme(panel.grid.major.x = element_line(colour = "gray"),
+        axis.text.x = element_text(angle = 0, hjust = 1),
+        axis.text.y = element_text(angle = 0, hjust = 1)) +
+    # theme_minimal() +
+    theme(legend.position="none") +
+  xlab("") + ylab("")
+} else if (input$site != "Network"){
+  key.variables.site = subset(key.variables, key.variables$organization == input$site)
+    ggplot(key.variables,aes(x=test_date, y = UNIQFRQ, group=factor(organization))) +
+  # geom_boxplot(aes(color=organization), alpha=0.2) +
+  geom_point(color = "white",shape = 21, size = 4, stroke= 1) + 
+  geom_line(color = "white", alpha= 0.6)+
+  geom_point(data = key.variables.site,
+             aes(x=test_date, y = UNIQFRQ), 
+             color = "red",shape = 21, size = 4, stroke= 2) + 
+  geom_line(data = key.variables.site,
+             aes(x=test_date, y = UNIQFRQ), 
+             color = "red", alpha= 0.6)+
+  # geom_text_repel(data = key.variables.site, 
+  #                 aes(label = organization))+
+  facet_wrap( ~ TabNam, scale="free_y", ncol = 2) +
+  scale_fill_gradient(limits=c(0, 1),low="#FFFAF0", high="#EE2C2C", guide=F ,na.value="white")+
+  theme(panel.grid.major.x = element_line(colour = "gray"),
+        axis.text.x = element_text(angle = 0, hjust = 1),
+        axis.text.y = element_text(angle = 0, hjust = 1)) +
+    # theme_minimal() +
+    theme(legend.position="none") +
+  xlab("") + ylab("")
+}
+
+})
+```
+
+
+Missingness 
+=======================================================================
+Row {.tabset .tabset-fade}
+-----------------------------------------------------------------------
+
+### missingness in available tables
+
+```{r, fig.keep='none'}
+renderPlot({
+
+DQ.Master.latest.nonraw = subset(DQ.Master.latest,  DQ.Master.latest$DQLVL %in% c("H","X") )
+DQ.Master.latest.nonraw.aggregate1 = DQ.Master.latest.nonraw  %>% 
+  group_by(TabNam,organization) %>% 
+  summarise(FRQ = mean(FRQ),
+            # frq2 = sum(FRQ),
+            numb = length(TabNam),
+            MS1_FRQ = sum(MS1_FRQ),
+            MS2_FRQ = sum(MS2_FRQ))
+
+DQ.Master.latest.nonraw.aggregate1$FRQ = DQ.Master.latest.nonraw.aggregate1$FRQ * DQ.Master.latest.nonraw.aggregate1$numb
+
+DQ.Master.latest.nonraw.aggregate1$MSs_PERC = (round((DQ.Master.latest.nonraw.aggregate1$MS1_FRQ+DQ.Master.latest.nonraw.aggregate1$MS2_FRQ)/DQ.Master.latest.nonraw.aggregate1$FRQ,2))
+DQ.Master.latest.nonraw.aggregate1$numb = NULL
+DQ.Master.latest.nonraw.aggregate1 = data.frame(DQ.Master.latest.nonraw.aggregate1)
+DQ.Master.latest.nonraw.aggregate1$perc = percent(DQ.Master.latest.nonraw.aggregate1$MSs_PERC)
+
+
+aggregate2x = DQ.Master.latest.nonraw.aggregate1  %>% 
+  group_by(TabNam) %>% 
+  summarise(FRQ = sum(FRQ),
+            # numb = length(TabNam),
+            MS1_FRQ = sum(MS1_FRQ),
+            MS2_FRQ = sum(MS2_FRQ))
+
+aggregate2x$MSs_PERC = (round((aggregate2x$MS1_FRQ+aggregate2x$MS2_FRQ)/aggregate2x$FRQ,4))
+aggregate2x$organization = "Network"
+aggregate2x = data.frame(select(aggregate2x,TabNam,organization,FRQ,MS1_FRQ,MS2_FRQ,MSs_PERC))
+aggregate2x$perc = percent(aggregate2x$MSs_PERC)
+
+# table.site.aggregated.missingness 
+tab.sit.agg.miss = rbind(DQ.Master.latest.nonraw.aggregate1, aggregate2x)
+
+if (input$site == "Network") {
+  ggplot(aggregate2x, aes(x=MSs_PERC,y=reorder(TabNam,-MSs_PERC),label = perc)) +
+  geom_point(aes(fill = MSs_PERC),shape = 21, colour = "black",  size = 8, stroke = 3, alpha = 0.9) +
+  geom_point(data=DQ.Master.latest.nonraw.aggregate1, aes(x=MSs_PERC,y=reorder(TabNam,-MSs_PERC)),
+             shape = 21, colour = "black",  size = 4, stroke = 3, alpha = 0.3) +
+  geom_text(vjust = 3, hjust = .5, nudge_y = 0, size = 4)+
+
+  scale_fill_gradient2(limits=c(0, 1),low="#FFFAF0", high="#EE2C2C", guide=F,na.value="white")+
+  # theme_grey(base_size = base_size) +
+  labs(x = "", y = "") +
+  scale_x_continuous(limits = c(0, 1)) +
+      scale_y_discrete(limits=c("death","demographic","diagnosis","encounter",
+                            "enrollment","harvest","lab_result_cm","prescribing",
+                            "vital","procedures","condition","dispensing")) +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_line(color = "gray",size = 2.5),
+        panel.grid.major.x = element_line(colour = "black", linetype = "dotted"),
+        axis.text.y=element_text(size=20, face="bold"))
+} else if (input$site != "Network") {
+  DQ.Master.latest.nonraw.aggregate1.site = subset(DQ.Master.latest.nonraw.aggregate1,
+                                                   DQ.Master.latest.nonraw.aggregate1$organization == input$site)
+  
+  aggregate2x = subset(DQ.Master.latest.nonraw.aggregate1,DQ.Master.latest.nonraw.aggregate1$organization != input$site )  %>% 
+  group_by(TabNam) %>% 
+  summarise(FRQ = sum(FRQ),
+            # numb = length(TabNam),
+            MS1_FRQ = sum(MS1_FRQ),
+            MS2_FRQ = sum(MS2_FRQ))
+
+aggregate2x$MSs_PERC = (round((aggregate2x$MS1_FRQ+aggregate2x$MS2_FRQ)/aggregate2x$FRQ,4))
+aggregate2x$organization = "Network"
+aggregate2x = data.frame(select(aggregate2x,TabNam,organization,FRQ,MS1_FRQ,MS2_FRQ,MSs_PERC))
+aggregate2x$perc = percent(aggregate2x$MSs_PERC)
+
+
+  ggplot(aggregate2x, aes(x=MSs_PERC,y=TabNam,label = perc)) +
+  geom_point(aes(fill = NULL),shape = 21, colour = "black",  size = 8, stroke = 3, alpha = 0.9) +
+      scale_fill_gradient2(limits=c(0, 1),low="#FFFAF0", high="#EE2C2C", guide=F,na.value="white")+
+  geom_point(data=DQ.Master.latest.nonraw.aggregate1, aes(x=MSs_PERC,y=TabNam),
+             shape = 21, colour = "black",  size = 4, stroke = 3, alpha = 0.3) +
+      # geom_text(vjust = 3, hjust = .5, nudge_y = 0, size = 4)+
+    geom_point(data=DQ.Master.latest.nonraw.aggregate1.site, aes(x=MSs_PERC,y=TabNam),
+             shape = 73, colour = "red",  size = 12, alpha = 1) +
+          geom_text(data=DQ.Master.latest.nonraw.aggregate1.site,vjust = 3, hjust = .5, nudge_y = 0, size = 4)+
+
+  # theme_grey(base_size = base_size) +
+  labs(x = "", y = "") +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_discrete(limits=c("death","demographic","diagnosis","encounter",
+                            "enrollment","harvest","lab_result_cm","prescribing",
+                            "vital","procedures","condition","dispensing")) +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_line(color = "gray",size = 2.5),
+        panel.grid.major.x = element_line(colour = "black", linetype = "dotted"),
+        axis.text.y=element_text(size=20, face="bold"))
+}
+
+})
+```
+
+### changes in missingness in available tables
+
+```{r, fig.keep='none'}
+renderPlot({
+
+#subseting to non-raw columns only
+DQ.Master.all.nonraw = subset(DQ.Master,  DQ.Master$DQLVL %in% c("H","X") )
+
+DQ.Master.all.nonraw.aggregate = DQ.Master.all.nonraw  %>% 
+  group_by(TabNam,organization,test_date) %>% 
+  summarise(FRQ = mean(FRQ),
+            numb = length(TabNam),
+            MS1_FRQ = sum(MS1_FRQ),
+            MS2_FRQ = sum(MS2_FRQ))
+
+DQ.Master.all.nonraw.aggregate$FRQ = DQ.Master.all.nonraw.aggregate$FRQ * DQ.Master.all.nonraw.aggregate$numb
+
+DQ.Master.all.nonraw.aggregate$MSs_PERC = (round((DQ.Master.all.nonraw.aggregate$MS1_FRQ+DQ.Master.all.nonraw.aggregate$MS2_FRQ)/
+                                                   DQ.Master.all.nonraw.aggregate$FRQ,2))
+DQ.Master.all.nonraw.aggregate$numb = NULL
+DQ.Master.all.nonraw.aggregate = data.frame(DQ.Master.all.nonraw.aggregate)
+DQ.Master.all.nonraw.aggregate$perc = percent(DQ.Master.all.nonraw.aggregate$MSs_PERC,digits = 0)
+
+if (input$site == "Network") {
+ggplot(DQ.Master.all.nonraw.aggregate,aes(x=test_date, y = MSs_PERC, group=factor(organization)))+
+  # geom_boxplot(aes(color=organization), alpha=0.2) +
+  geom_point(aes(color=organization), shape = 21, size = 4, stroke= 1, guide=F) + 
+  geom_line(aes(color=organization), alpha= 0.6, guide=F)+
+  # geom_text_repel(aes(label = organization),vjust = 3, hjust = .5, nudge_y = 0, size = 4)+
+  # geom_text_repel(aes(label = perc),vjust = 3, hjust = .5, nudge_y = 0, size = 4)+
+  facet_wrap( ~ TabNam, scale="free_y", ncol = 4) +
+  scale_fill_gradient(limits=c(0, 1),low="#FFFAF0", high="#EE2C2C", guide=F ,na.value="white")+
+  theme(panel.grid.major.x = element_line(colour = "gray"),
+        axis.text.x = element_text(angle = 0, hjust = 1),
+        axis.text.y = element_text(angle = 0, hjust = 1)) +
+    # theme_minimal() +
+    theme(legend.position="bottom") + guides(colour = guide_legend(nrow = 1)) +
+  xlab("") + ylab("") #+ coord_polar(theta = "x", direction=1 )
+
+} else if (input$site != "Network") {
+
+DQ.Master.all.nonraw.aggregate$site2 = ifelse(DQ.Master.all.nonraw.aggregate$organization == input$site, 1, 0)
+
+ggplot(DQ.Master.all.nonraw.aggregate,aes(x=test_date, y = MSs_PERC, group=factor(organization))) +
+  # geom_boxplot(aes(color=organization), alpha=0.2) +
+  geom_point(aes(color = factor(site2)), shape = 21, size = 4, stroke= 3, guide=F,alpha= 0.6) + 
+  geom_line(aes(color = factor(site2)), alpha= 0.6, guide=F) +
+  # geom_text_repel(aes(label = organization),vjust = 3, hjust = .5, nudge_y = 0, size = 4)+
+  geom_text_repel(data=subset(DQ.Master.all.nonraw.aggregate, DQ.Master.all.nonraw.aggregate$organization == input$site),aes(label = perc),vjust = 3, hjust = .5, nudge_y = 0, size = 4)+
+  facet_wrap( ~ TabNam, scale="free_y", ncol = 4) +
+  scale_colour_manual(values = c("white","red"),
+                    labels = c("other sites",paste0(input$site)))+
+theme(panel.grid.major.x = element_line(colour = "gray"),
+        axis.text.x = element_text(angle = 0, hjust = 1),
+        axis.text.y = element_text(angle = 0, hjust = 1)) +
+    # theme_minimal() +
+    theme(legend.position="bottom") + guides(colour = guide_legend(nrow = 1)) +
+  xlab("") + ylab("")
+}
+
+})
+```
+
+
+Missingness (by column) **beta**
+=======================================================================
+```{r, include=FALSE}
+DQ.Master.latest.aggregate2 <- DQ.Master.latest  %>% 
+  group_by(TabNam,ColNam) %>% 
+  summarise(FRQ = sum(FRQ),UNIQFRQ = sum(UNIQFRQ),MS1_FRQ = sum(MS1_FRQ),MS2_FRQ = sum(MS2_FRQ))
+
+DQ.Master.latest.aggregate2$MSs_PERC = (round((DQ.Master.latest.aggregate2$MS1_FRQ+
+                                                 DQ.Master.latest.aggregate2$MS2_FRQ)/DQ.Master.latest.aggregate2$FRQ,2))
+
+
+DQ.Master.latest.aggregate2$test_date = as.character(format(Sys.Date(),"%m-%d-%Y"))
+DQ.Master.latest.aggregate2$organization = Net.Name
+DQ.Master.latest.aggregate2$round = 1
+DQ.Master.latest.aggregate2$perc = percent(DQ.Master.latest.aggregate2$MSs_PERC)
+
+# 
+DQ.Master.latest$perc = percent(DQ.Master.latest$MSs_PERC)
+##############
+##############
+###############
+
+
+```
+
+
+Row {.tabset .tabset-fade vertical_layout: fill}
+-----------------------------------------------------------------------
+
+### completeness by table/column treemap (*beta*) 
+
+```{r, fig.keep='none'}
+renderHighchart({
+  
+  if (names(dev.cur()) != "null device") dev.off()
+pdf(NULL)
+
+if (input$site == "Network") {
+#   d = DQ.Master.latest.aggregate2 %>%
+#   group_by(TabNam) %>%
+#   summarise(MS = sum(as.numeric(FRQ)))
+# 
+# DQ.Master.latest.aggregate2 = merge(DQ.Master.latest.aggregate2,d, by= "TabNam", all.x = TRUE)
+# DQ.Master.latest.aggregate2$MS = log10(DQ.Master.latest.aggregate2$MS)
+DQ.Master.latest.aggregate2$MS = log10(as.numeric(DQ.Master.latest.aggregate2$FRQ))
+
+  tm3 = treemap(DQ.Master.latest.aggregate2,
+        index = c("ColNam"),
+        vSize = "MS",
+        vColor="MSs_PERC",
+        type="value",
+        title = "",
+        # title.legend = "column availability across network",
+        border.col = "white",
+        position.legend = "bottom",
+        palette = rev(viridis(6)),
+        range = c(0,100)
+)
+  
+  highchart() %>% 
+    hc_add_series_treemap(tm3, allowDrillToNode = TRUE,
+                          layoutAlgorithm = "squarified") #%>% 
+    # hc_add_theme(thm)
+} else if (input$site != "Network") {
+  
+  dato = subset(DQ.Master.latest, DQ.Master.latest$organization == input$site)
+  dato$MS = log10(as.numeric(dato$FRQ))
+
+  tm3 = treemap(dato,
+        index = c("ColNam"),
+        vSize = "MS",
+        vColor="MSs_PERC",
+        type="value",
+        title = "",
+        # title.legend = "column availability across network",
+        border.col = "white",
+        position.legend = "bottom",
+        palette = rev(viridis(6)),
+        range = c(0,100)
+)
+  
+  highchart() %>% 
+    hc_add_series_treemap(tm3, allowDrillToNode = TRUE,
+                          layoutAlgorithm = "squarified") #%>% 
+    # hc_add_theme(thm)
+
+  
+  }
+  
+  
+  
+  
+})
+
+```
+
+### missingness by column **collapsible tree** (*beta*)
+
+```{r, fig.keep='last'}
+renderCollapsibleTree({
+if (input$site == "Network") {
+  DQ.Master.latest.aggregate2 %>%
+  group_by(TabNam, ColNam) %>%
+  summarise(MS = (sum(sum(as.numeric(MS1_FRQ))+sum(as.numeric(MS2_FRQ))))/sum(as.numeric(FRQ))
+  ) %>%
+  collapsibleTreeSummary(
+    hierarchy = c("TabNam", "ColNam"),
+    root = paste0(unique(DQ.Master.latest.aggregate2$organization)),
+    width = 800,
+    attribute = "MS",
+    maxPercent = 75
+  )
+} else if (input$site != "Network") {
+  
+  dat = subset(DQ.Master.latest, DQ.Master.latest$organization == input$site)
+  root = as.character(unique(dat$organization))
+  dat <- dat %>%
+  group_by(TabNam, ColNam) %>%
+  summarise(MS = (sum(sum(as.numeric(MS1_FRQ))+sum(as.numeric(MS2_FRQ))))/sum(as.numeric(FRQ))
+  ) 
+  dat$MS <- ifelse(dat$MS == 0, 0.000001,dat$MS)
+  
+  dat %>%
+  collapsibleTreeSummary(
+    hierarchy = c("TabNam", "ColNam"),
+    root = paste0(root),
+    width = 800,
+    attribute = "MS",
+    maxPercent = 75
+  )
+  
+}
+
+})
+```
+
+
+Missingness (key indicators) 
+=======================================================================
+Row {.tabset .tabset-fade}
+-----------------------------------------------------------------------
+
+### missingness in key indicators
+
+```{r, fig.keep='none'}
+renderPlot({
+
+if (input$site == "Network") {
+ggplot(withouts.network.latest.aggregate, aes(x=missing.ratio,y=group,
+                                              label = perc)) +
+  geom_point(aes(fill = missing.ratio),shape = 21, colour = "black",  size = 8, stroke = 3, alpha = 0.9) +
+  geom_point(data=withouts.network.latest, aes(x=missing.ratio,y=group),
+             shape = 21, colour = "black",  size = 4, stroke = 3, alpha = 0.3) +
+  geom_text(vjust = 3, hjust = .5, nudge_y = 0, size = 4)+
+
+  scale_fill_gradient(limits=c(0, 1),low="#FFFAF0", high="#EE2C2C", guide=F,na.value="white")+
+  # theme_grey(base_size = base_size) +
+  labs(x = "", y = "") +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_discrete(limits=c("blood_pressure","ethnicity","gender","height","race","smoking","weight")) +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_line(color = "gray",size = 2.5),
+        panel.grid.major.x = element_line(colour = "black", linetype = "dotted"),
+        axis.text.y=element_text(size=20, face="bold"))
+} else if (input$site != "Network") {
+  
+  withouts.network.latest.site = subset(withouts.network.latest, withouts.network.latest$organization == input$site)
+  
+  withouts.network.latest.aggregate <- subset(withouts.network.latest, withouts.network.latest$organization != input$site) %>% group_by(group) %>% summarise(missing.pop = sum(missing.population),denominator = sum(denominator))
+
+# 
+withouts.network.latest.aggregate$missing.ratio <- round((withouts.network.latest.aggregate$missing.pop/withouts.network.latest.aggregate$denominator),4)
+withouts.network.latest.aggregate$perc <- percent(withouts.network.latest.aggregate$missing.ratio)
+withouts.network.latest.aggregate$organization <- "Network"
+withouts.network.latest.aggregate$test_date <- as.character(format(Sys.Date(),"%m-%d-%Y"))
+
+
+  ggplot(withouts.network.latest.aggregate, aes(x=missing.ratio,y=group,
+                                              label = perc)) +
+  geom_point(aes(fill = NULL),shape = 21, colour = "black",  size = 8, stroke = 3, alpha = 0.8) +
+  geom_point(data=withouts.network.latest, aes(x=missing.ratio,y=group),
+             shape = 21, colour = "black",  size = 4, stroke = 3, alpha = 0.3) +
+  scale_fill_gradient(limits=c(0, 1),low="#FFFAF0", high="#EE2C2C", guide=F,na.value="white")+
+   geom_point(data=withouts.network.latest.site, aes(x=missing.ratio,y=group),
+             shape = 73, colour = "red",  size = 12, alpha = 0.9) +
+    geom_text_repel(data=withouts.network.latest.site,aes(label = perc),
+                  nudge_y = 0, size = 4, box.padding = 0.5, point.padding = 0.5)+
+  # theme_grey(base_size = base_size) +
+  labs(x = "", y = "") +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_discrete(limits=c("blood_pressure","ethnicity","gender","height","race","smoking","weight")) +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_line(color = "gray",size = 2.5),
+        panel.grid.major.x = element_line(colour = "black", linetype = "dotted"),
+        axis.text.y=element_text(size=20, face="bold"))
+  
+}
+  
+})
+```
+
+### changes in missingness in key indicators
+
+```{r, fig.keep='none'}
+renderPlot({
+if (input$site == "Network") {
+ggplot(withouts.network,aes(x=test_date, y = missing.percentage, group=factor(organization)))+
+  # geom_boxplot(aes(color=organization), alpha=0.2) +
+  geom_point(aes(color=organization), shape = 21, size = 4, stroke= 1, guide=F) + 
+  geom_line(aes(color=organization), alpha= 0.6, guide=F)+
+  # geom_text_repel(aes(label = organization),vjust = 3, hjust = .5, nudge_y = 0, size = 4)+
+  # geom_text_repel(aes(label = perc),vjust = 3, hjust = .5, nudge_y = 0, size = 4)+
+  facet_wrap( ~ group, scale="free_y", ncol = 5) +
+  scale_fill_gradient(limits=c(0, 1),low="#FFFAF0", high="#EE2C2C", guide=F ,na.value="white")+
+  theme(panel.grid.major.x = element_line(colour = "gray"),
+        axis.text.x = element_text(angle = 0, hjust = 1),
+        axis.text.y = element_text(angle = 0, hjust = 1)) +
+    # theme_minimal() +
+    theme(legend.position="bottom") + guides(colour = guide_legend(nrow = 1)) +
+  xlab("") + ylab("") #+ coord_polar(theta = "x", direction=1 )
+} else if (input$site != "Network") {
+  
+  withouts.network$site2 = ifelse(withouts.network$organization == input$site, 1, 0)
+  
+  ggplot(withouts.network,aes(x=test_date, y = missing.percentage, group=factor(organization)))+
+  # geom_boxplot(aes(color=organization), alpha=0.2) +
+  geom_point(aes(color = factor(site2)), shape = 21, size = 4, stroke= 3, guide=F) + 
+  geom_line(aes(color = factor(site2)), alpha= 0.6, guide=F)+
+  # geom_text_repel(aes(label = organization),vjust = 3, hjust = .5, nudge_y = 0, size = 4)+
+  geom_text_repel(data=subset(withouts.network,withouts.network$organization == input$site),aes(label = perc),vjust = 3, hjust = .5, nudge_y = 0, size = 4)+
+  facet_wrap( ~ group, scale="free_y", ncol = 5) +
+  scale_colour_manual(values = c("white","red"),
+                    labels = c("other sites",paste0(input$site)))+
+  theme(panel.grid.major.x = element_line(colour = "gray"),
+        axis.text.x = element_text(angle = 0, hjust = 1),
+        axis.text.y = element_text(angle = 0, hjust = 1)) +
+    # theme_minimal() +
+    theme(legend.position="bottom") + guides(colour = guide_legend(nrow = 1)) +
+  xlab("") + ylab("")
+  
+}
+
+
+})
+```
